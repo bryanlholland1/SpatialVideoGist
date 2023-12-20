@@ -63,6 +63,15 @@ import VideoToolbox
         return formatter
     }
     
+    /// A formatter that can be used for converting byte counts, such as file sizes, to strings.
+    private var byteCountFormatter: ByteCountFormatter {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useGB, .useMB, .useKB]
+        formatter.countStyle = .file
+        return formatter
+    }
+    
+    
     // MARK: - Methods
     
     // MARK: Public
@@ -114,15 +123,20 @@ import VideoToolbox
 
         // Configure the frame rate and number of frames to provide to the view for calculating time remaining.
         let frameRate = try await videoTrack.load(.nominalFrameRate)
+        let dataRate = try await videoTrack.load(.estimatedDataRate)
         let duration = try await heroAsset.load(.duration)
         let frames = CMTimeGetSeconds(duration) * Double(frameRate)
         totalFrames = frames
+        
+        // TODO: Add functionality to specify desired output resolution, bitrate, and
+        // TODO: horizontal disparity.
         
         // Setup the video output settings
         var videoSettings = AVOutputSettingsAssistant(preset: .mvhevc1440x1440)?.videoSettings
         videoSettings?[AVVideoWidthKey] = leftEyeRegion.width
         videoSettings?[AVVideoHeightKey] = leftEyeRegion.height
         var compressionProperties = videoSettings?[AVVideoCompressionPropertiesKey] as! [String: Any]
+        compressionProperties[AVVideoAverageBitRateKey] = dataRate
         compressionProperties[kVTCompressionPropertyKey_HorizontalDisparityAdjustment as String] = 0
         compressionProperties[kCMFormatDescriptionExtension_HorizontalFieldOfView as String] = 90
         videoSettings?[AVVideoCompressionPropertiesKey] = compressionProperties
@@ -303,11 +317,7 @@ import VideoToolbox
     private func saveLastConvertedFile(outputURL: URL) async throws {
         do {
             let attr = try FileManager.default.attributesOfItem(atPath: outputURL.path)
-            var fileSize: Double = .zero
-            
-            if let size = attr[FileAttributeKey.size] as? NSNumber {
-                fileSize = size.doubleValue / 1000000.0
-            }
+            let fileSize = attr[FileAttributeKey.size] as? Int64
             
             let asset = AVAsset(url: outputURL)
             let duration = try await asset.load(.duration)
@@ -315,7 +325,7 @@ import VideoToolbox
             self.lastConvertedFileURL = LastConvertedFile(
                 filePath: outputURL,
                 timeToProcess: dateFormatter.string(from: startTime, to: Date.now) ?? "Unknown",
-                fileSize: "\(fileSize.rounded(toPlaces: 2))MB",
+                fileSize: byteCountFormatter.string(fromByteCount: fileSize ?? 0),
                 duration: dateFormatter.string(from: duration.seconds) ?? "Unknown"
             )
         } catch {
