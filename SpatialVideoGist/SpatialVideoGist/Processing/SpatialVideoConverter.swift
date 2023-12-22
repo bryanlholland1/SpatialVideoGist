@@ -105,12 +105,12 @@ import VideoToolbox
         }
         let audioTrack = try await heroAsset.loadTracks(withMediaType: .audio).first
         
-        guard let formatDescription = try await videoTrack.load(.formatDescriptions).first else {
+        guard let videoFormatDescription = try await videoTrack.load(.formatDescriptions).first else {
             return
         }
         
         if !processor.isPrepared {
-            processor.prepare(with: formatDescription, outputRetainedBufferCountHint: 1)
+            processor.prepare(with: videoFormatDescription, outputRetainedBufferCountHint: 1)
         }
         
         // Setup the source video size and calculate the region for the left and right eye images.
@@ -149,7 +149,7 @@ import VideoToolbox
         writerVideoInput.expectsMediaDataInRealTime = false
         
         // Setup the audio input settings, if there is an audio track
-        if let audioTrack {
+        if audioTrack != nil {
             writerAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
         }
         
@@ -249,9 +249,12 @@ import VideoToolbox
                             self.calculateTimeRemaining()
                             
                         } else {
-                            sourceVideoURL.stopAccessingSecurityScopedResource()
-                            self.videoWritingFinished.toggle()
-                            self.stop(with: outputVideoURL)
+                            if !self.videoWritingFinished {
+                                sourceVideoURL.stopAccessingSecurityScopedResource()
+                                self.videoWritingFinished.toggle()
+                                writerVideoInput.markAsFinished()
+                                self.stop(with: outputVideoURL)
+                            }
                         }
                 }
             }
@@ -267,8 +270,11 @@ import VideoToolbox
                         if let sample = readerAudioOutput.copyNextSampleBuffer() {
                             writerAudioInput.append(sample)
                         } else {
-                            self.audioWritingFinished.toggle()
-                            self.stop(with: outputVideoURL)
+                            if !self.audioWritingFinished {
+                                self.audioWritingFinished.toggle()
+                                writerAudioInput.markAsFinished()
+                                self.stop(with: outputVideoURL)
+                            }
                         }
                     }
                 }
@@ -319,11 +325,9 @@ import VideoToolbox
             let writerVideoInput,
             videoWritingFinished
         else { return }
-        writerVideoInput.markAsFinished()
         
         if let writerAudioInput {
             guard audioWritingFinished else { return }
-            writerAudioInput.markAsFinished()
         }
         
         self.writer?.finishWriting { [weak self] in
@@ -353,6 +357,9 @@ import VideoToolbox
         self.readerVideoOutput = nil
         self.readerAudioOutput = nil
         self.heroReader = nil
+        
+        self.videoWritingFinished = false
+        self.audioWritingFinished = false
     }
     
     /// Creates a reference to the last successfully completed file for processing, which can be used for
