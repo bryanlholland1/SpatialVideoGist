@@ -35,6 +35,12 @@ import VideoToolbox
     /// The last successfully converted file.
     var lastConvertedFileURL: LastConvertedFile?
     
+    /// The left eye view of the current frame being processed, in a stereoscopic video.
+    var leftEyeImage: CVPixelBuffer?
+    
+    /// The right eye view of the current frame being processed, in a stereoscopic video.
+    var rightEyeImage: CVPixelBuffer?
+    
     // MARK: Private
     
     /// A helper processor that can be used to crop and convert between underlying image types.
@@ -44,7 +50,7 @@ import VideoToolbox
     private var writer: AVAssetWriter?
     
     /// The queue in which to dispatch the `AVAssetWriter` on.
-    private let queue = DispatchQueue(label: "com.test.spatialwriter")
+    private let queue = DispatchQueue(label: "com.bbl11.spatialwriter")
     
     /// The `AVAssetWriter`'s input for accepting video frames.
     var writerInput: AVAssetWriterInput?
@@ -208,7 +214,9 @@ import VideoToolbox
                             )
                             else { return }
                             
-                            // TODO: Add a video preview of what's being processed.
+                            // Set a video preview
+                            self.leftEyeImage = leftEye
+                            self.rightEyeImage = rightEye
 
                             // Create an array of `CMTaggedBuffers, one for each eye's view.
                             let taggedBuffers: [CMTaggedBuffer] = [

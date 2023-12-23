@@ -44,10 +44,15 @@ struct ContentView: View {
                             .foregroundStyle(.gray)
                         Text("Choose a video, and a destination, to convert a stereoscopic video to a Spatial Video.")
                     } else {
-                        // TODO: Support a video preview of file being converted
-                        EmptyView()
+                        if let leftEyeImage = videoConverter.leftEyeImage,
+                           let rightEyeImage = videoConverter.rightEyeImage {
+                            VideoPreview(
+                                leftEyePreviewImage: leftEyeImage,
+                                rightEyePreviewImage: rightEyeImage
+                            )
+                            .padding()
+                        }
                     }
-                    
                     
                     Spacer()
                     
