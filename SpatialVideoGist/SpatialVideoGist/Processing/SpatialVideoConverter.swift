@@ -49,17 +49,32 @@ import VideoToolbox
     /// The video writer that writes video frames to a file.
     private var writer: AVAssetWriter?
     
-    /// The queue in which to dispatch the `AVAssetWriter` on.
-    private let queue = DispatchQueue(label: "com.bbl11.spatialwriter")
+    /// The queue in which to dispatch the `AVAssetWriter`'s video input on.
+    private let videoInputQueue = DispatchQueue(label: "com.test.spatialWriterVideo")
+    
+    /// The queue in which to dispatch the `AVAssetWriter`'s audio input on.
+    private let audioInputQueue = DispatchQueue(label: "com.test.spatialWriterAudio")
     
     /// The `AVAssetWriter`'s input for accepting video frames.
-    var writerInput: AVAssetWriterInput?
+    private var writerVideoInput: AVAssetWriterInput?
+    
+    /// The `AVAssetWriter`'s input for accepting audio samples.
+    private var writerAudioInput: AVAssetWriterInput?
     
     /// The reader that processes the source video.
-    var heroReader: AVAssetReader?
+    private var heroReader: AVAssetReader?
     
-    /// The track output of the `AVAssetReader`.
-    var readerOutput: AVAssetReaderTrackOutput?
+    /// The video track output of the `AVAssetReader`.
+    private var readerVideoOutput: AVAssetReaderTrackOutput?
+    
+    /// The audio track output of the `AVAssetReader`.
+    private var readerAudioOutput: AVAssetReaderTrackOutput?
+    
+    /// An internal flag indicating whether the video writer has finished processing all frames.
+    private var videoWritingFinished = false
+    
+    /// An internal flag indicating whether the audio writer has finished processing all frames.
+    private var audioWritingFinished = false
     
     /// A formatter that can be used for converting timestamps, such as processing time, to strings.
     private var dateFormatter: DateComponentsFormatter {
@@ -103,13 +118,14 @@ import VideoToolbox
         guard let videoTrack = try await heroAsset.loadTracks(withMediaType: .video).first else {
             return
         }
+        let audioTrack = try await heroAsset.loadTracks(withMediaType: .audio).first
         
-        guard let formatDescription = try await videoTrack.load(.formatDescriptions).first else {
+        guard let videoFormatDescription = try await videoTrack.load(.formatDescriptions).first else {
             return
         }
         
         if !processor.isPrepared {
-            processor.prepare(with: formatDescription, outputRetainedBufferCountHint: 1)
+            processor.prepare(with: videoFormatDescription, outputRetainedBufferCountHint: 1)
         }
         
         // Setup the source video size and calculate the region for the left and right eye images.
@@ -148,13 +164,18 @@ import VideoToolbox
         videoSettings?[AVVideoCompressionPropertiesKey] = compressionProperties
         
         // Setup the video input settings
-        writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        guard let writerInput else { return }
-        writerInput.expectsMediaDataInRealTime = false
+        writerVideoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        guard let writerVideoInput else { return }
+        writerVideoInput.expectsMediaDataInRealTime = false
+        
+        // Setup the audio input settings, if there is an audio track
+        if audioTrack != nil {
+            writerAudioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
+        }
         
         // Setup the pixel buffer group adaptor for writing left and right eye frames.
         let pixelBufferAdaptor = AVAssetWriterInputTaggedPixelBufferGroupAdaptor(
-            assetWriterInput: writerInput,
+            assetWriterInput: writerVideoInput,
             sourcePixelBufferAttributes: .none)
         
         // Setup the reader for the stereoscopic video file, or a left eye (hero eye) view, if views were provided for each
@@ -164,21 +185,30 @@ import VideoToolbox
             kCVPixelBufferWidthKey as String: naturalSize.width,
             kCVPixelBufferHeightKey as String: naturalSize.height
         ]
-        readerOutput = AVAssetReaderTrackOutput(
+        readerVideoOutput = AVAssetReaderTrackOutput(
             track: videoTrack,
             outputSettings: readerOutputSettings)
+        if let audioTrack {
+            readerAudioOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil)
+        }
         heroReader = try AVAssetReader(asset: heroAsset)
         
         // Add the necessary outputs to the reader and start reading.
         guard let heroReader,
-              let readerOutput
+              let readerVideoOutput
         else { return }
-        heroReader.add(readerOutput)
+        heroReader.add(readerVideoOutput)
+        if let readerAudioOutput {
+            heroReader.add(readerAudioOutput)
+        }
         heroReader.startReading()
         
         // Add the necessary inputs to the writer and start the session.
         guard let writer else { return }
-        writer.add(writerInput)
+        writer.add(writerVideoInput)
+        if let writerAudioInput {
+            writer.add(writerAudioInput)
+        }
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
@@ -189,17 +219,17 @@ import VideoToolbox
         // completion calculations.
         startTime = Date.now
         
-        // Inform the writer's input to request data when it's ready.
-        writerInput.requestMediaDataWhenReady(on: queue) { [weak self] in
+        // Inform the writer's video input to request data when it's ready.
+        writerVideoInput.requestMediaDataWhenReady(on: videoInputQueue) { [weak self] in
             guard let self else { return }
-            while writerInput.isReadyForMoreMediaData {
+            while writerVideoInput.isReadyForMoreMediaData {
                 autoreleasepool {
                     guard self.processor.isPrepared else {
                         print("The processor is not prepared.  Cannot write video")
                         return
                     }
                     
-                    if let frame = readerOutput.copyNextSampleBuffer(),
+                    if let frame = readerVideoOutput.copyNextSampleBuffer(),
                        let frameBuffer = CMSampleBufferGetImageBuffer(frame) {
                             let sourceBuffer = CIImage(cvImageBuffer: frameBuffer)
                             
@@ -241,9 +271,34 @@ import VideoToolbox
                             self.calculateTimeRemaining()
                             
                         } else {
-                            sourceVideoURL.stopAccessingSecurityScopedResource()
-                            self.stop(with: outputVideoURL)
+                            if !self.videoWritingFinished {
+                                sourceVideoURL.stopAccessingSecurityScopedResource()
+                                self.videoWritingFinished.toggle()
+                                writerVideoInput.markAsFinished()
+                                self.stop(with: outputVideoURL)
+                            }
                         }
+                }
+            }
+        }
+        
+        // Inform the writer's audio input to request data when it's ready.
+        if let writerAudioInput,
+           let readerAudioOutput {
+            writerAudioInput.requestMediaDataWhenReady(on: audioInputQueue) { [weak self] in
+                guard let self else { return }
+                while writerAudioInput.isReadyForMoreMediaData {
+                    autoreleasepool {
+                        if let sample = readerAudioOutput.copyNextSampleBuffer() {
+                            writerAudioInput.append(sample)
+                        } else {
+                            if !self.audioWritingFinished {
+                                self.audioWritingFinished.toggle()
+                                writerAudioInput.markAsFinished()
+                                self.stop(with: outputVideoURL)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -255,7 +310,8 @@ import VideoToolbox
     /// - Parameter expectedOutputURL: The expected output `URL` of the file that is being cancelled, so the
     /// necessary temporary file can be removed and permissions reset.
     func cancel(expectedOutputURL: URL) {
-        writerInput?.markAsFinished()
+        writerVideoInput?.markAsFinished()
+        writerAudioInput?.markAsFinished()
         writer?.cancelWriting()
         try? removeExistingFile(at: expectedOutputURL)
         resetWriter()
@@ -288,9 +344,13 @@ import VideoToolbox
     /// - Parameter outputURL: The output URL of the converted file.
     private func stop(with outputURL: URL) {
         guard isProcessing,
-            let writerInput
+            let writerVideoInput,
+            videoWritingFinished
         else { return }
-        writerInput.markAsFinished()
+        
+        if let writerAudioInput {
+            guard audioWritingFinished else { return }
+        }
         
         self.writer?.finishWriting { [weak self] in
             guard let self else {return}
@@ -313,10 +373,15 @@ import VideoToolbox
         self.timeRemaining = 0
         self.startTime = .now
         
-        self.writerInput = nil
+        self.writerVideoInput = nil
+        self.writerAudioInput = nil
         self.writer = nil
-        self.readerOutput = nil
+        self.readerVideoOutput = nil
+        self.readerAudioOutput = nil
         self.heroReader = nil
+        
+        self.videoWritingFinished = false
+        self.audioWritingFinished = false
     }
     
     /// Creates a reference to the last successfully completed file for processing, which can be used for
